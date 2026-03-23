@@ -1,0 +1,19 @@
+[project]
+name = "mfclab"
+version = "0.1.0"
+description = "MFClab - PySide6 Application with PyQtGraph"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2.4.3",
+    "pandas>=3.0.1",
+    "pyqtgraph>=0.14.0",
+    "pyside6>=6.10.2",
+    "scipy>=1.17.1",
+]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.19.0",
+    "pytest>=9.0.2",
+]
