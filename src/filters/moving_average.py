@@ -35,6 +35,13 @@ class MovingAverageFilter(BaseFilter):
         window_size: int = p["window_size"]
         return (window_size - 1) / 2.0
 
+    def startup_discard_samples(
+        self, ctx: SignalContext, data_len: int, **params: Any
+    ) -> int:
+        p = self.validate_params(ctx, **params)
+        window_size: int = p["window_size"]
+        return max(0, min(data_len, window_size - 1))
+
     def apply(
         self, data: NDArray[np.float64], ctx: SignalContext, **params: Any
     ) -> NDArray[np.float64]:

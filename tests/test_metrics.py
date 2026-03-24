@@ -91,6 +91,22 @@ def test_hf_rms_invalid_params():
     assert hf_rms(data, fs=1000.0, cutoff_hz=0.0) == 0.0
 
 
+def test_hf_rms_at_nyquist_returns_zero():
+    """Nyquist에서 통과 가능한 고주파 대역이 없으므로 0.0."""
+    fs = 1000.0
+    t = np.arange(5000) / fs
+    data = np.sin(2 * np.pi * 2 * t).astype(np.float64)
+    assert hf_rms(data, fs=fs, cutoff_hz=fs / 2.0) == 0.0
+
+
+def test_hf_rms_above_nyquist_returns_zero():
+    """Nyquist 초과 cutoff도 0.0으로 처리."""
+    fs = 1000.0
+    t = np.arange(5000) / fs
+    data = np.sin(2 * np.pi * 200 * t).astype(np.float64)
+    assert hf_rms(data, fs=fs, cutoff_hz=fs) == 0.0
+
+
 # ── compute_metrics ──────────────────────────────────────
 
 

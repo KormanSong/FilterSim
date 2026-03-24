@@ -68,9 +68,9 @@ def hf_rms(data: NDArray[np.float64], fs: float, cutoff_hz: float) -> float:
     if data.size < 2 or fs <= 0 or cutoff_hz <= 0:
         return 0.0
 
-    # cutoff가 Nyquist 이상이면 모든 성분이 고주파 → 전체 std
+    # cutoff가 Nyquist 이상이면 통과 가능한 고주파 대역이 없다.
     if cutoff_hz >= fs / 2:
-        return float(np.std(data, ddof=0))
+        return 0.0
 
     dt = 1.0 / fs
     rc = 1.0 / (2.0 * math.pi * cutoff_hz)

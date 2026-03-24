@@ -83,6 +83,23 @@ class FilterChain:
 
         return total, has_known, has_unknown
 
+    def estimate_startup_discard_samples(
+        self, ctx: SignalContext, data_len: int
+    ) -> int:
+        """활성 필터 체인의 초기 warm-up discard 샘플 수를 집계한다."""
+        total = 0
+
+        for entry in self._entries:
+            if not entry.enabled:
+                continue
+            total += int(
+                entry.filter_instance.startup_discard_samples(
+                    ctx, data_len, **entry.params
+                )
+            )
+
+        return max(0, min(data_len, total))
+
     def execute(self, data: NDArray, ctx: SignalContext) -> NDArray[np.float64]:
         """활성화된 필터를 순서대로 적용하고 결과를 반환한다.
 

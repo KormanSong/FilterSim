@@ -66,7 +66,9 @@ def create_main_window():
     window._filter_chain = FilterChain()
     window._collapsed_states = []
     window._filtered_data = None  # 캐시: metrics 재계산 시 체인 재실행 방지
+    window._startup_discard_samples = 0
     window._current_mode = "filter"
+    window._duplicate_intervals = 0
 
     _setup_graphs(window)
     _setup_region(window)
@@ -227,20 +229,30 @@ def _load_data(window, path: str, time_col: str, data_col: str):
         QMessageBox.warning(window, "Warning", "Not enough valid data points (need \u2265 2).")
         return
 
+    duplicate_intervals = int(np.sum(np.diff(time_arr) == 0))
+
     try:
         ctx = validate_time_axis(time_arr, n_total, n_valid)
     except Exception as e:
         QMessageBox.critical(window, "Error", f"Time axis validation failed:\n{e}")
         return
 
-    # 불균일 경고
-    if not ctx.is_uniform:
+    # duplicate timestamp / 불균일 시간축 경고
+    if duplicate_intervals > 0 or not ctx.is_uniform:
+        details = []
+        if duplicate_intervals > 0:
+            details.append(
+                f"{duplicate_intervals:,} duplicate timestamp interval(s) detected.\n"
+                "This can happen with logging artifacts; samples will still be loaded."
+            )
+        if not ctx.is_uniform:
+            details.append("Time axis appears non-uniform.")
+
         reply = QMessageBox.warning(
             window,
-            "Non-uniform Time Axis",
-            f"Time axis appears non-uniform.\n"
-            f"Estimated fs = {ctx.fs:.1f} Hz will be used.\n\n"
-            f"Continue anyway?",
+            "Time Axis Warning",
+            "\n\n".join(details)
+            + f"\n\nEstimated fs = {ctx.fs:.1f} Hz will be used.\n\nContinue anyway?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         )
@@ -253,6 +265,7 @@ def _load_data(window, path: str, time_col: str, data_col: str):
     window._filter_chain.clear()
     window._collapsed_states.clear()
     window._filtered_data = None
+    window._startup_discard_samples = 0
     _rebuild_chain_ui(window)
 
     # 상태 저장
@@ -260,6 +273,7 @@ def _load_data(window, path: str, time_col: str, data_col: str):
     window._time_array = time_arr
     window._data_array = data_arr
     window._signal_ctx = ctx
+    window._duplicate_intervals = duplicate_intervals
 
     # 필터 모드로 복귀 (분석 모드에서 새 파일 로드 시)
     if window._current_mode != "filter":
@@ -317,6 +331,7 @@ def _on_clear_chain(window):
     window._filter_chain.clear()
     window._collapsed_states.clear()
     window._filtered_data = None
+    window._startup_discard_samples = 0
     _rebuild_chain_ui(window)
     _update_graphs(window)
 
@@ -379,11 +394,19 @@ def _build_status_text(window) -> str:
         return "No data loaded"
 
     text = f"Total {ctx.n_total:,} / Valid {ctx.n_valid:,} / fs = {ctx.fs:.0f} Hz"
+    duplicate_intervals = getattr(window, "_duplicate_intervals", 0)
+    if duplicate_intervals > 0:
+        text += f" / Duplicate ts = {duplicate_intervals:,}"
 
     chain = window._filter_chain
     has_active = any(entry.enabled for entry in chain.entries)
     if not has_active:
         return text
+
+    startup_discard = getattr(window, "_startup_discard_samples", 0)
+    if startup_discard > 0:
+        warmup_ms = startup_discard * ctx.dt * 1000.0
+        text += f" / Warm-up skip = {startup_discard} samples ({warmup_ms:.1f} ms)"
 
     delay_samples, has_known, has_unknown = chain.estimate_delay_samples(ctx)
     if has_known:
@@ -428,24 +451,41 @@ def _update_filter_mode(window):
     if len(chain) == 0 or not has_active:
         window._line_filtered.setData([], [])
         window._filtered_data = None
+        window._startup_discard_samples = 0
     else:
         try:
             filtered_data = chain.execute(data_arr, ctx)
-            window._line_filtered.setData(time_arr, filtered_data)
+            startup_discard = chain.estimate_startup_discard_samples(
+                ctx, len(filtered_data)
+            )
+            window._startup_discard_samples = startup_discard
+
+            if startup_discard >= len(filtered_data):
+                window._line_filtered.setData([], [])
+            else:
+                window._line_filtered.setData(
+                    time_arr[startup_discard:], filtered_data[startup_discard:]
+                )
             window._filtered_data = filtered_data  # 캐시
         except (ValueError, Exception) as e:
             window._line_filtered.setData([], [])
             window._filtered_data = None
+            window._startup_discard_samples = 0
             window.labelStatus.setText(f"Filter error: {e}")
             filter_error = True
 
     # ── 3) FFT: Raw (항상 갱신) ──
-    freqs_raw, mags_raw = compute_fft(data_arr, ctx.fs, window_name)
+    raw_fft_input = data_arr
+    if filtered_data is not None and not filter_error:
+        raw_fft_input = data_arr[window._startup_discard_samples:]
+
+    freqs_raw, mags_raw = compute_fft(raw_fft_input, ctx.fs, window_name)
     window._line_fft_raw.setData(freqs_raw, _apply_display_floor(mags_raw))
 
     # ── 4) FFT: Filtered (활성 필터 있고 에러 없을 때만) ──
     if filtered_data is not None and not filter_error:
-        freqs_f, mags_f = compute_fft(filtered_data, ctx.fs, window_name)
+        fft_input = filtered_data[window._startup_discard_samples:]
+        freqs_f, mags_f = compute_fft(fft_input, ctx.fs, window_name)
         window._line_fft_filtered.setData(freqs_f, _apply_display_floor(mags_f))
     else:
         window._line_fft_filtered.setData([], [])
@@ -483,6 +523,7 @@ def _update_metrics(window):
     filtered = window._filtered_data
     ctx = window._signal_ctx
     time_arr = window._time_array
+    startup_discard = getattr(window, "_startup_discard_samples", 0)
 
     # 데이터 또는 필터 결과 없으면 초기화
     if data_arr is None or filtered is None or ctx is None or time_arr is None:
@@ -490,14 +531,30 @@ def _update_metrics(window):
         window.labelHFRMS.setText("\u2014")
         return
 
+    if startup_discard >= len(filtered):
+        window.labelSettledStd.setText("\u2014")
+        window.labelHFRMS.setText("\u2014")
+        return
+
+    effective_time = time_arr[startup_discard:]
+    effective_raw = data_arr[startup_discard:]
+    effective_filtered = filtered[startup_discard:]
+
     # 분석 구간 → 인덱스 변환
     t_min, t_max = window._analysis_region.getRegion()
-    start_idx = int(np.searchsorted(time_arr, t_min, side="left"))
-    end_idx = int(np.searchsorted(time_arr, t_max, side="right"))
+    start_idx = int(np.searchsorted(effective_time, t_min, side="left"))
+    end_idx = int(np.searchsorted(effective_time, t_max, side="right"))
+
+    if end_idx - start_idx < 2:
+        window.labelSettledStd.setText("\u2014")
+        window.labelHFRMS.setText("\u2014")
+        return
 
     cutoff_hz = window.spinHFCutoff.value()
 
-    result = compute_metrics(data_arr, filtered, ctx.fs, cutoff_hz, start_idx, end_idx)
+    result = compute_metrics(
+        effective_raw, effective_filtered, ctx.fs, cutoff_hz, start_idx, end_idx
+    )
 
     # Settled std 표시
     if result.raw_settled_std > 0:

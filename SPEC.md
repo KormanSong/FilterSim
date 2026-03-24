@@ -1,133 +1,155 @@
-# 유량 센서 Raw Data 분석 프로그램 — 개발 명세서 v6
+# 유량 센서 Raw Data 분석 프로그램 - 개발 명세서
 
 ## 개요
 
-느린 유량 센서의 raw data에서, 지연 보정과 노이즈 제거의 균형을 잡아 실제 유량을 최대한 잘 추정하기 위한 Windows 데스크톱 분석 도구. CSV 시계열 데이터에 커스텀 필터를 체인 방식으로 적용하고, 원본/필터 결과를 시간축 및 주파수축(FFT)으로 비교 분석한다.
+느린 유량 센서의 raw data를 대상으로, 지연과 노이즈 사이의 균형을 보며 필터 조합을 실험하고
+시간영역과 주파수영역에서 결과를 비교하는 Windows 데스크톱 분석 도구다.
 
-## 기술 스택 (필수)
+현재 사용자에게 노출된 핵심 워크플로는 다음과 같다.
 
-- Python 3.13+, PySide6 (PyQt 아님 — LGPL 라이선스), PyQtGraph, pandas, numpy, scipy
+1. CSV를 연다.
+2. Time/Data 열을 고른다.
+3. 시간축을 검증한다.
+4. 필터 체인을 구성한다.
+5. Time domain, FFT, 메트릭으로 결과를 비교한다.
+
+## 기술 스택
+
+- Python 3.13+
+- PySide6
+- PyQtGraph
+- pandas
+- numpy
+- scipy
 
 ## 설계 원칙
 
-- **Causal-only**: 모든 필터는 미래 샘플을 사용하지 않는 causal 구현만 허용한다. 임베디드 펌웨어에 동일한 수식으로 이식 가능해야 한다.
-- **펌웨어 일치성**: PC 분석 결과와 MCU 실행 결과가 동일해야 한다. `filtfilt` 등 양방향 필터는 참고용으로만 사용하고, 최종 평가는 causal 필터 기준으로 한다.
-- **플러그인 구조 유지**: 신규 필터 추가 시 파일 1개 + 레지스트리 1줄 등록만으로 완료. 기존 코드를 수정하지 않는다.
+- **Causal-first**: 현재 앱에 포함된 실시간용 필터는 미래 샘플을 보지 않는 방향을 우선한다.
+- **펌웨어 일치성 존중**: MCU로 옮기기 쉬운 수식과 상태 모델을 선호한다.
+- **플러그인 구조 유지**: 신규 필터는 `BaseFilter` 상속 + 레지스트리 등록으로 확장한다.
+- **시간축 신뢰성 우선**: 잘못된 시간축으로 잘못된 `fs`를 만들어 분석 전체를 왜곡하지 않도록, 시간축 검증을 신중하게 적용한다.
 
 ## 기능 요구사항
 
-### 1. CSV 파일 열기
-- 버튼 클릭 → 팝업(QDialog)에서 CSV 파일 선택
-- **1단계: 헤더만 먼저 읽어** 컬럼 목록을 콤보박스에 표시
-- **2단계: Time 열, Data 열 선택 후 해당 열만 읽기** (`usecols` 활용, 메모리 절약)
+### 1. CSV 열기
 
-### 2. 시간축 검증 (CSV 로드 직후, 분석 전 필수)
-- Time 열에서 **dt(샘플 간격)와 fs(샘플링 주파수)를 자동 계산**
-- **fs 반올림 정책**: 대략적으로 균일한 경우, 가장 가까운 실용 주파수로 반올림하여 사용 (예: dt 평균 ≈ 0.001s → fs = 1000 Hz로 퉁침). 필터/FFT에는 이 반올림된 fs를 공통 사용
-- Time 간격이 허용 오차를 넘게 불균일하면 **경고 다이얼로그** 표시
-- **Time 열 단조 증가 검증**: 비단조 시 경고 또는 로드 거부
-- 계산된 fs는 이후 필터 설계와 FFT 주파수축 생성에 공통으로 사용
-- 재샘플링 기능은 향후 확장 항목으로 둠
+- CSV 로드 UI는 별도 다이얼로그에서 처리한다.
+- 첫 단계에서는 헤더만 읽어 Time/Data 열 후보를 보여준다.
+- 실제 데이터 로드 시에는 선택된 두 열만 읽는다.
+- 숫자로 변환되지 않는 값은 `NaN`으로 처리한 뒤 pairwise drop 한다.
 
-### 3. 필터 체인 (핵심)
-- 필터를 순서대로 직렬 적용하는 파이프라인 구조
-- 각 필터는 개별 on/off 토글, 삭제, 순서 변경 가능
-- 동일 필터를 파라미터만 바꿔 중복 적용 가능
+### 2. 시간축 검증
 
-### 4. 필터 프레임워크 (확장성 — 매우 중요)
-- 모든 필터는 공통 BaseFilter를 상속하는 플러그인 구조
-- **apply()는 데이터 배열과 함께 신호 컨텍스트(fs, dt 등)를 반드시 전달받을 것** — 주파수 기반 필터는 fs 없이 설계 불가
-- 필터 파라미터 정의는 **타입·범위·단위·제약조건·소수점 자릿수(decimals)·도움말(help_text)을 포함하는 ParamSpec 구조**로 설계하여, 공용 폼 생성기가 UI를 자동 생성할 수 있도록 할 것
-- **dt 스케일링**: 프로세스 노이즈 등 시간 의존 파라미터는 `std² × dt`로 스케일링하여 샘플링 주파수에 무관한 동작을 보장할 것
-- **예상 지연**: 각 필터는 `estimated_delay_samples()` 메서드로 근사 지연을 반환할 수 있으며, 체인 전체의 예상 지연(ms)을 UI에 표시한다
-- 신규 필터 추가 시: **파일 1개 생성 + 레지스트리 1줄 등록**만으로 완료
+- Time 열은 **monotonically non-decreasing**이어야 한다.
+- duplicate timestamp(`dt == 0`)는 logging artifact로 보고 허용한다.
+- 역순 timestamp(`dt < 0`)는 허용하지 않는다.
+- duplicate timestamp가 있으면 로드 시 경고를 띄우고, 상태 표시에도 duplicate 개수를 남긴다.
+- 양의 dt들의 상대 표준편차가 충분히 작으면, 모든 샘플이 균일한 Hz라고 가정하고 대표 dt(중앙값)에서 운영용 `fs`를 정한다.
+- 간격 분산이 크면 불균일 시간축으로 간주하고 경고를 띄운다.
+- 불균일 시간축은 경고 후 사용자가 계속 진행할지 결정하게 한다.
 
-### 5. 기본 필터 구현 시 주의사항
-- Median Filter: **scipy.ndimage.median_filter 사용** (scipy.signal.medfilt는 느리고 zero-padding 문제 있음)
-- FIR: scipy.signal.firwin + filtfilt 기반, 컷오프 주파수 범위는 0 ~ fs/2 (참고: filtfilt는 non-causal이므로 펌웨어 이식 대상이 아님)
-- 모든 필터는 **출력 길이를 입력과 동일하게 유지**
-- 가장자리(edge) 처리: **reflect(mirror) padding** 적용 후 필터링 → 원본 길이로 trim — 이상값(spike) 없이 경계를 안정적으로 처리 (약간의 정보 손실은 허용)
+### 3. 필터 체인
 
-### 6. 그래프 (모두 PyQtGraph)
-- 메인 그래프: Raw data와 Filtered data를 색상 구분하여 오버레이
-- FFT Raw: 원본 데이터의 주파수 스펙트럼
-- FFT Filtered: 필터 적용 후 주파수 스펙트럼
-- **FFT 엔진: scipy.fft.rfft / rfftfreq 사용** (실수 신호이므로 one-sided spectrum, 0 ~ fs/2)
-- FFT window 선택: None / Hann / Hamming / Blackman (spectral leakage 저감)
-- 필터 변경 시 모든 그래프 실시간 갱신
+- 필터는 순서대로 직렬 적용한다.
+- 각 필터는 on/off, 삭제, 순서 변경이 가능해야 한다.
+- 같은 종류의 필터를 다른 파라미터로 중복 적용할 수 있어야 한다.
 
-### 7. 평가 지표
+### 4. 필터 프레임워크
 
-필터 적용 전후의 효과를 정량적으로 비교할 수 있는 지표를 제공한다.
+- 모든 필터는 `BaseFilter`를 상속한다.
+- `apply(data, ctx, **params)` 형식으로 동작한다.
+- 파라미터 정의는 `ParamSpec`으로 통일한다.
+- 필터별로 `estimated_delay_samples()`를 제공할 수 있다.
+- UI 폼은 `ParamSpec`을 바탕으로 자동 생성한다.
 
-- **Settled noise std**: 안정 구간에서의 표준편차 변화량
-- **고주파 대역 RMS**: 센서 고유 대역 이상의 에너지 변화
-- **예상 delay (ms)**: 필터 체인 전체의 누적 지연
+### 5. 현재 필터 구현
+
+#### 이동평균 (MA)
+
+- 과거와 현재 샘플만 사용하는 causal moving average
+- 시작 구간은 실제 누적 개수로 나누어 warm-up 한다
+
+#### Median
+
+- `scipy.ndimage.median_filter`를 사용한다
+- `origin=kernel_size // 2`와 `mode="nearest"`를 이용해 causal median 형태로 동작한다
+
+#### FIR
+
+- `scipy.signal.firwin`으로 계수를 설계한다
+- 적용은 `scipy.signal.lfilter` 기반의 single-pass causal FIR로 수행한다
+- `filtfilt`는 사용하지 않는다
+- 데이터가 너무 짧으면 필터를 무리하게 적용하지 않고 원본 복사 또는 안전한 tap 축소를 사용한다
+
+#### IIR LPF
+
+- 1차 RC low-pass
+- 식: `y[n] = y[n-1] + alpha * (x[n] - y[n-1])`
+
+#### IIR LPF (2차)
+
+- 동일한 1차 EMA 두 단을 직렬로 연결한 critically damped low-pass
+
+#### Bessel LPF (2nd)
+
+- 2차 Bessel low-pass biquad
+- 리드 보상 후 overshoot를 최소화하는 후단 smoothing 용도로 사용한다
+
+#### 미분 필터
+
+- 리드 보상기 기반 필터
+- 원신호와 차분 상태를 이용해 빠른 응답을 보강한다
+
+### 6. 그래프
+
+- 메인 그래프: Raw / Filtered time-domain overlay
+- FFT Raw: 원본 데이터의 one-sided magnitude spectrum
+- FFT Filtered: 필터 결과의 one-sided magnitude spectrum
+- 지원 window: None, Hann, Hamming, Blackman
+- FFT 엔진은 window별 DC 제거와 coherent gain 보정을 수행한다
+
+### 7. 메트릭
+
+- Settled noise std
+- High-frequency RMS
+- 예상 delay
+
+HF RMS는 시간영역 1차 IIR high-pass equivalent 잔차 기반으로 계산한다.
+cutoff가 Nyquist 이상이면 통과 가능한 고주파 대역이 없다고 보고 `0.0`으로 처리한다.
 
 ### 8. 상태 표시
-- **총 N건 / 유효 Nvalid건 / fs = xxx Hz / 예상 delay = xxx ms**
 
-## UI 레이아웃
+- 총 row 수
+- 유효 row 수
+- 운영용 `fs`
+- 체인 delay 추정치
+- 필터 오류 시 에러 메시지
 
-- 윈도우 비율: 가로:세로 약 5:3 (가로로 길쭉)
-- 좌우 분할
+## UI 요구사항
 
-```
-┌──────────────────────────────┬──────────────────────────┐
-│                              │  CSV 열기, 열 선택         │
-│   메인 그래프                  │  필터 선택 + 파라미터 입력  │
-│   Raw(회색) + Filtered(파랑)  │  [추가] 버튼              │
-│                              │                          │
-├──────────────┬───────────────┤  적용된 필터 체인           │
-│  FFT — Raw   │FFT — Filtered │  (위→아래 순서로 카드 나열)  │
-│              │               │  각 카드: 이름, ☑, ✕, ▲▼  │
-│              │               │  전체 초기화               │
-└──────────────┴───────────────┴──────────────────────────┘
-```
+- 그래프는 `.ui`에서 빈 컨테이너를 두고 코드에서 PyQtGraph를 삽입한다.
+- CSV 로드는 메뉴 액션 `actionOpenCSV`에서 시작한다.
+- 필터 추가/삭제/순서 변경/토글이 한 화면에서 가능해야 한다.
+- 메트릭 영역은 HF cutoff와 분석 구간 표시 토글을 제공해야 한다.
 
-- 좌측: 그래프 영역 (상단 메인그래프 + 하단 FFT 좌우 분할)
-- 우측: 모든 컨트롤 요소 (CSV, 필터 선택, 필터 체인, 상태 표시)
+## 테스트 요구사항
 
-## 디자인 원칙
-
-- 깔끔, 간결, 단순 — 과도한 스타일링 불필요, 기본 Qt 스타일 사용
-- UI와 로직, 필터를 폴더 단위로 분리할 것
+- 필터 개별 테스트
+- 필터 체인 테스트
+- FFT 엔진 테스트
+- 메트릭 엔진 테스트
+- CSV 로더와 시간축 검증 회귀 테스트
 
 ## 배포
 
-- PyInstaller (onefile + windowed, `mfclab.spec`)
-- 주의: 환경에 PySide6만 남기고 다른 Qt 바인딩(PyQt6 등) 섞지 않을 것
+- PyInstaller 기반 단일 실행 파일 빌드를 기준 경로로 사용한다.
+- UI `.ui` 파일은 빌드 산출물에 포함되어야 한다.
 
-## 주의사항
+## 향후 확장
 
-- PySide6만 사용 (PyQt6 금지)
-- 모든 그래프는 PyQtGraph (Matplotlib 사용 금지)
-- 필터 프레임워크의 플러그인 구조가 깨지지 않도록 할 것
-- 라이선스: LGPL 요구사항을 준수하는 범위에서 소스 비공개 가능 (배포 시 라이선스 고지 포함)
-
-## 향후 확장 고려
-
-### 도메인 분석 모드 (raw–model–residual)
-- 1차 모델 피팅 (고정 τ / 자동 추정 τ)
-- residual = raw - model 계산
-- Residual Welch PSD (주 분석용), Spectrogram/STFT (시간-주파수 분석)
-- step 시작점 / plateau 구간 자동 검출
-
-### 모니터링 모드 / 복원 모드 분리
-- **모니터링**: causal, MCU 친화, 실시간 — "튀지 않고 안정적으로 보이는가?"
-- **복원**: 오프라인, 모델 기반 — "실제 유량에 얼마나 가까운가?"
-
-### 복원용 평가 지표
-- final value error, transition RMSE, residual RMS, residual whiteness, peak detection
-
-### 밴드별/구간별 분석
-- 시간 구간: pre-step / transition / settled 분리
-- 주파수 대역: drift / 시스템 응답 / 노이즈 분할
-
-### 기타
-- 불균일 시간축 재샘플링 기능
-- FFT 표시 Linear / dB 전환
-- 대용량 CSV chunksize 읽기
-- 다중 Data 열 오버레이
-- 필터 체인 프리셋 저장/불러오기 (JSON)
-- 필터 적용 결과 CSV 내보내기
+- 도메인 분석 모드(raw-model-residual)
+- CSV export
+- 필터 체인 preset 저장/불러오기
+- 그래프 이미지 export
+- 대용량 CSV 비동기 로드
+- 다중 채널 비교

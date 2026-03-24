@@ -36,6 +36,13 @@ class MedianFilter(BaseFilter):
         kernel_size: int = p["kernel_size"]
         return float(kernel_size // 2)
 
+    def startup_discard_samples(
+        self, ctx: SignalContext, data_len: int, **params: Any
+    ) -> int:
+        p = self.validate_params(ctx, **params)
+        kernel_size: int = p["kernel_size"]
+        return max(0, min(data_len, kernel_size - 1))
+
     def apply(
         self, data: NDArray[np.float64], ctx: SignalContext, **params: Any
     ) -> NDArray[np.float64]:

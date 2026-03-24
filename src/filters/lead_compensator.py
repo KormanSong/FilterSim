@@ -48,6 +48,14 @@ class LeadCompensatorFilter(BaseFilter):
         ),
     )
 
+    def startup_discard_samples(
+        self, ctx: SignalContext, data_len: int, **params: Any
+    ) -> int:
+        self.validate_params(ctx, **params)
+        if data_len <= 0:
+            return 0
+        return 1
+
     def apply(
         self, data: NDArray[np.float64], ctx: SignalContext, **params: Any
     ) -> NDArray[np.float64]:

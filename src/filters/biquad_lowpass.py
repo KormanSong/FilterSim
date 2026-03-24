@@ -12,6 +12,8 @@ from src.filters.base import BaseFilter, ParamSpec
 from src.signal_context import SignalContext
 
 _EPSILON = 1e-12
+_C_FRIENDLY_MAX_CUTOFF_RATIO = 0.45
+_BESSEL_PRACTICAL_Q = 0.57735026919
 
 
 def _apply_biquad(
@@ -77,8 +79,10 @@ class _BaseSecondOrderLowpassFilter(BaseFilter):
             return self.params_spec
 
         nyquist = ctx.fs / 2.0
+        c_friendly_limit = ctx.fs * _C_FRIENDLY_MAX_CUTOFF_RATIO
+        max_cutoff = min(nyquist - 0.1, c_friendly_limit)
         return tuple(
-            replace(spec, max=nyquist - 0.1) if spec.name == "cutoff_hz" else spec
+            replace(spec, max=max_cutoff) if spec.name == "cutoff_hz" else spec
             for spec in self.params_spec
         )
 
@@ -101,21 +105,40 @@ class _BaseSecondOrderLowpassFilter(BaseFilter):
 class BesselLowpassFilter(_BaseSecondOrderLowpassFilter):
     name = "Bessel LPF (2nd)"
     description = (
-        "Second-order Bessel low-pass biquad for post-lead smoothing with minimal step overshoot"
+        "Second-order low-pass biquad using a C-friendly fixed-Q Bessel-like formulation"
     )
 
     def _design_biquad(
         self, cutoff_hz: float, fs: float
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-        from scipy.signal import bessel
+        fc = _clamp_cutoff_hz(fs, cutoff_hz)
+        k = float(np.tan(np.pi * fc / fs))
+        q = _BESSEL_PRACTICAL_Q
+        norm = 1.0 / (1.0 + (k / q) + (k * k))
 
-        b, a = bessel(
-            2,
-            cutoff_hz,
-            btype="lowpass",
-            analog=False,
-            output="ba",
-            fs=fs,
-            norm="mag",
+        b = np.asarray(
+            [
+                (k * k) * norm,
+                2.0 * (k * k) * norm,
+                (k * k) * norm,
+            ],
+            dtype=np.float64,
         )
-        return np.asarray(b, dtype=np.float64), np.asarray(a, dtype=np.float64)
+        a = np.asarray(
+            [
+                1.0,
+                2.0 * ((k * k) - 1.0) * norm,
+                (1.0 - (k / q) + (k * k)) * norm,
+            ],
+            dtype=np.float64,
+        )
+        return b, a
+
+
+def _clamp_cutoff_hz(fs: float, cutoff_hz: float) -> float:
+    """Clamp cutoff to the MCU-friendly operating range."""
+    if fs <= 0.0:
+        return 0.001
+
+    clamped = max(0.001, float(cutoff_hz))
+    return min(clamped, fs * _C_FRIENDLY_MAX_CUTOFF_RATIO)

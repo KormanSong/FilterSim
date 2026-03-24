@@ -174,6 +174,19 @@ class TestFilterChain:
         assert has_known is True
         assert has_unknown is False
 
+    def test_startup_discard_samples_accumulate_across_enabled_filters(self, ctx):
+        chain = FilterChain()
+        chain.add(MovingAverageFilter(), {"window_size": 5})
+        chain.add(LeadCompensatorFilter(), {"kr_coeff1": 1.0})
+        assert chain.estimate_startup_discard_samples(ctx, data_len=500) == 5
+
+    def test_startup_discard_samples_skip_disabled_filters(self, ctx):
+        chain = FilterChain()
+        chain.add(MovingAverageFilter(), {"window_size": 5})
+        chain.add(FIRFilter(), {"mode": "lowpass", "cutoff_low": 50.0, "numtaps": 21})
+        chain.set_enabled(1, False)
+        assert chain.estimate_startup_discard_samples(ctx, data_len=500) == 4
+
     def test_entries_is_readonly_snapshot(self):
         """entries 반환값을 변조해도 내부 상태에 영향 없음"""
         chain = FilterChain()

@@ -1,16 +1,17 @@
 # MFClab
 
-유량 센서 Raw Data 분석기 — CSV 시계열 데이터의 필터링과 FFT 스펙트럼 비교.
+유량 센서 Raw Data 분석기. CSV 시계열 데이터를 불러와 필터 체인을 적용하고,
+시간영역 파형, FFT 스펙트럼, 정량 지표를 함께 비교하는 PySide6 데스크톱 앱입니다.
 
 ## Features
 
-- CSV 파일 로드 (시간축 자동 검증, 불균일 시간축 경고)
-- 실시간 필터 체인: Moving Average, Median, FIR, IIR Lowpass, Lead Compensator
-- 필터 추가/삭제/순서변경/토글/파라미터 편집, 카드 접기/펼치기
-- Time domain: Raw (gray) + Filtered (blue) 비교
-- FFT: Raw / Filtered 스펙트럼 비교 (Hann, Hamming, Blackman window)
-- Window별 가중평균 DC 제거, Coherent gain 보정
-- PyInstaller 단일 .exe 빌드 지원
+- CSV 열기 다이얼로그: 파일 선택, 헤더 읽기, Time/Data 열 선택을 한 화면에서 처리
+- 시간축 검증: 역순 시간축 거부, duplicate timestamp 허용(경고 및 상태 표시), 간격 분산이 작으면 균일 샘플링으로 간주, 운영용 `fs` 자동 계산
+- 필터 체인: 추가, 삭제, 순서 변경, on/off 토글, 카드 접기/펼치기
+- 지원 필터: 이동평균 (MA), Median, FIR, IIR LPF, IIR LPF (2차), Bessel LPF (2nd), 미분 필터
+- 그래프: Time domain Raw/Filtered 비교 + FFT Raw/Filtered 비교
+- 평가 지표: Settled noise std, High-frequency RMS, 예상 delay
+- 빌드: PyInstaller 기반 단일 실행 파일 생성
 
 ## Requirements
 
@@ -35,45 +36,65 @@ uv run python main.py
 uv run python -m pytest
 ```
 
-현재 62개 테스트 (필터 34 + 체인 14 + FFT 14)
+현재 테스트 스위트는 필터, 체인, FFT, 메트릭, CSV 로더/시간축 검증 회귀 테스트를 포함합니다.
 
-## Build (PyInstaller)
+## Build
 
 ```bash
 uv run pyinstaller mfclab.spec --noconfirm
 ```
 
-산출물: `dist/MFClab.exe` (단일 실행 파일, ~103 MB)
+산출물은 `dist/MFClab.exe`입니다.
 
-> pyside6-deploy는 uv 환경(pip 미설치)에서 동작하지 않아 PyInstaller를 사용합니다.
+> `pyside6-deploy`는 현재 `uv` 환경 구성과 맞지 않아 사용하지 않고, PyInstaller를 표준 빌드 경로로 사용합니다.
 
 ## Project Structure
 
-```
+```text
 MFClab/
-├── main.py                 # Entry point
-├── mfclab.spec             # PyInstaller build config
-├── ui/mainwindow.ui        # Qt Designer UI (objectName 계약)
+├── main.py
+├── mfclab.spec
+├── pyproject.toml
+├── README.md
+├── SPEC.md
+├── PLAN.md
+├── LICENSES.md
+├── ui/
+│   └── mainwindow.ui
 ├── src/
-│   ├── main_window.py      # UI 로드 + 시그널 연결 + 그래프
-│   ├── csv_loader.py       # CSV 헤더/열 로드 + 시간축 검증
-│   ├── signal_context.py   # SignalContext (fs, dt, is_uniform)
-│   ├── filter_chain.py     # 필터 파이프라인 엔진
-│   ├── fft_engine.py       # FFT 계산 (rfft, window별 DC 제거)
-│   ├── param_form.py       # ParamSpec 기반 폼 자동 생성
-│   ├── chain_card.py       # 필터 체인 카드 위젯 (접기/펼치기)
-│   ├── resources.py        # Frozen/개발 환경 경로 헬퍼
-│   └── filters/            # 필터 플러그인
-│       ├── base.py         # BaseFilter + ParamSpec
+│   ├── main_window.py
+│   ├── csv_dialog.py
+│   ├── csv_loader.py
+│   ├── signal_context.py
+│   ├── filter_chain.py
+│   ├── fft_engine.py
+│   ├── metrics_engine.py
+│   ├── param_form.py
+│   ├── chain_card.py
+│   ├── resources.py
+│   ├── scipy_preload.py
+│   └── filters/
+│       ├── __init__.py
+│       ├── base.py
 │       ├── moving_average.py
 │       ├── median.py
 │       ├── fir.py
 │       ├── iir_lpf.py
+│       ├── critical_damped_lpf.py
+│       ├── biquad_lowpass.py
 │       └── lead_compensator.py
-├── tests/                  # pytest 단위 테스트 (62개)
-└── data/rawdata.csv        # 샘플 데이터 (98,444행)
+├── tests/
+│   ├── test_filters.py
+│   ├── test_filter_chain.py
+│   ├── test_fft.py
+│   ├── test_metrics.py
+│   └── test_csv_loader.py
+└── data/
+    └── rawdata.csv
 ```
 
-## License
+## Notes
 
-See [LICENSES.md](LICENSES.md) for third-party library licenses.
+- 현재 사용자에게 노출된 메인 워크플로는 필터 모드입니다.
+- 분석 구간(region)과 메트릭 UI는 필터 모드의 정량 비교를 위한 기능입니다.
+- 서드파티 라이선스는 [LICENSES.md](LICENSES.md)를 참고하세요.

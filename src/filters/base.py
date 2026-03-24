@@ -69,6 +69,16 @@ class BaseFilter(ABC):
         """
         return None
 
+    def startup_discard_samples(
+        self, ctx: SignalContext, data_len: int, **params: Any
+    ) -> int:
+        """초기 warm-up 구간으로 버릴 샘플 수를 반환한다.
+
+        기본값은 0이다. MA/FIR처럼 충분한 과거 샘플이 쌓이기 전까지
+        출력이 불안정한 필터는 이 메서드를 오버라이드한다.
+        """
+        return 0
+
     def validate_params(self, ctx: SignalContext, **params: Any) -> dict[str, Any]:
         """ParamSpec 기반 공통 검증 → 검증 통과된 params dict 반환.
 

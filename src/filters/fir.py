@@ -77,6 +77,15 @@ class FIRFilter(BaseFilter):
         numtaps: int = p["numtaps"]
         return (numtaps - 1) / 2.0
 
+    def startup_discard_samples(
+        self, ctx: SignalContext, data_len: int, **params: Any
+    ) -> int:
+        p = self.validate_params(ctx, **params)
+        effective_numtaps = _resolve_effective_numtaps(data_len, p["numtaps"])
+        if effective_numtaps is None:
+            return 0
+        return max(0, min(data_len, effective_numtaps - 1))
+
     def get_params_spec(self, ctx: SignalContext | None = None) -> tuple[ParamSpec, ...]:
         """cutoff의 max를 ctx.fs / 2로 동적 조정."""
         if ctx is None:
@@ -99,28 +108,21 @@ class FIRFilter(BaseFilter):
         mode: str = p["mode"]
         cutoff_low: float = p["cutoff_low"]
         cutoff_high: float = p["cutoff_high"]
-        numtaps: int = p["numtaps"]
+        effective_numtaps = _resolve_effective_numtaps(len(data), p["numtaps"])
         nyquist = ctx.fs / 2.0
 
-        # 짧은 데이터 대응: numtaps 축소
-        if len(data) < _MIN_SAMPLES_FOR_FIR:
+        if effective_numtaps is None:
             return data.copy()
-
-        max_taps = len(data) // 3
-        if max_taps < 5:
-            return data.copy()
-        if numtaps > max_taps:
-            numtaps = max_taps | 1  # 홀수 보장
 
         # firwin 파라미터 구성
         if mode == "lowpass":
             if cutoff_low >= nyquist:
                 raise ValueError(f"FIR: cutoff_low ({cutoff_low}) must be < Nyquist ({nyquist})")
-            coeffs = firwin(numtaps, cutoff_low, fs=ctx.fs, pass_zero="lowpass")
+            coeffs = firwin(effective_numtaps, cutoff_low, fs=ctx.fs, pass_zero="lowpass")
         elif mode == "highpass":
             if cutoff_high >= nyquist:
                 raise ValueError(f"FIR: cutoff_high ({cutoff_high}) must be < Nyquist ({nyquist})")
-            coeffs = firwin(numtaps, cutoff_high, fs=ctx.fs, pass_zero="highpass")
+            coeffs = firwin(effective_numtaps, cutoff_high, fs=ctx.fs, pass_zero="highpass")
         elif mode == "bandpass":
             if cutoff_low >= cutoff_high:
                 raise ValueError(
@@ -128,10 +130,25 @@ class FIRFilter(BaseFilter):
                 )
             if cutoff_high >= nyquist:
                 raise ValueError(f"FIR: cutoff_high ({cutoff_high}) must be < Nyquist ({nyquist})")
-            coeffs = firwin(numtaps, [cutoff_low, cutoff_high], fs=ctx.fs, pass_zero="bandpass")
+            coeffs = firwin(
+                effective_numtaps, [cutoff_low, cutoff_high], fs=ctx.fs, pass_zero="bandpass"
+            )
         else:
             raise ValueError(f"FIR: unknown mode '{mode}'")
 
         # single-pass causal FIR — 실제 펌웨어와 같은 방향으로만 누적한다.
         result = lfilter(coeffs, 1.0, data)
         return np.asarray(result, dtype=np.float64)
+
+
+def _resolve_effective_numtaps(data_len: int, requested_numtaps: int) -> int | None:
+    """입력 길이에 맞는 실제 FIR tap 수를 계산한다."""
+    if data_len < _MIN_SAMPLES_FOR_FIR:
+        return None
+
+    max_taps = data_len // 3
+    if max_taps < 5:
+        return None
+    if requested_numtaps > max_taps:
+        return max_taps | 1
+    return requested_numtaps

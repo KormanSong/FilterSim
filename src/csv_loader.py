@@ -5,7 +5,7 @@ import pandas as pd
 
 from src.signal_context import SignalContext
 
-# 균일성 판정: 전체 구간 기반 fs와 중앙값 기반 fs의 불일치율 허용치
+# 균일성 판정: 대표 dt 대비 상대 표준편차 허용치
 _UNIFORMITY_TOLERANCE = 0.05
 
 
@@ -47,46 +47,48 @@ def validate_time_axis(
     """시간축을 검증하고 SignalContext를 생성한다.
 
     사전 조건:
-      - 시간축이 순(strictly) 단조 증가해야 함
+      - 시간축은 비감소(monotonic non-decreasing)해야 함
       - time_span > 0, dt_median > 0 이어야 함
 
     균일성 판정:
-      전체 구간 기반 fs_span과 중앙값 기반 fs_median의 불일치율로 판정.
-      양자화 노이즈(CSV 소수점 해상도 한계)에 강건함.
+      양의 dt들의 대표값(중앙값) 대비 상대 표준편차로 판정한다.
+      양자화 노이즈(CSV 소수점 해상도 한계)에 강건하며,
+      중복 timestamp(dt=0)는 대표 dt 계산에서 제외한다.
     """
     dt_array = np.diff(time_array)
 
-    # 단조 비감소 검증 (dt=0 허용, 음수는 거부)
+    # 단조 비감소 검증: logging artifact로 생긴 duplicate timestamp(dt=0)는 허용한다.
     if np.any(dt_array < 0):
-        n_bad = int(np.sum(dt_array < 0))
+        n_negative = int(np.sum(dt_array < 0))
         raise ValueError(
-            f"Time column is not monotonically increasing "
-            f"({n_bad:,} negative intervals found). "
-            f"Please select the correct Time column."
+            "Time column must be monotonically non-decreasing "
+            f"({n_negative:,} negative interval(s) found). "
+            "Please select the correct Time column."
         )
 
-    # dt=0 제외한 중앙값 (동일 타임스탬프 구간 무시)
     dt_positive = dt_array[dt_array > 0]
     if len(dt_positive) == 0:
-        raise ValueError("All time intervals are zero — cannot determine sampling rate.")
+        raise ValueError("All time intervals are zero - cannot determine sampling rate.")
     dt_median = np.median(dt_positive)
+    dt_std = np.std(dt_positive, ddof=0)
+    relative_std = float(dt_std / dt_median) if dt_median > 0 else float("inf")
 
     # 전체 구간 기반
     time_span = time_array[-1] - time_array[0]
     n = len(time_array)
     fs_span = (n - 1) / time_span
 
-    # 중앙값 기반
+    # 대표 dt 기반
     fs_median = 1.0 / dt_median
 
+    # 상대 표준편차가 충분히 작으면 균일 샘플링으로 간주하고 대표 dt를 사용한다.
+    is_uniform = bool(relative_std < _UNIFORMITY_TOLERANCE)
+    fs_estimate = fs_median if is_uniform else fs_span
+
     # 반올림된 운영 fs
-    fs = round(fs_span)
+    fs = round(fs_estimate)
     if fs <= 0:
         raise ValueError(f"Computed sampling frequency is invalid (fs={fs}).")
-
-    # 균일성: 두 추정치의 불일치율
-    discrepancy = abs(fs_span - fs_median) / abs(fs_span)
-    is_uniform = discrepancy < _UNIFORMITY_TOLERANCE
 
     return SignalContext(
         fs=float(fs),

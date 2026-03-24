@@ -74,6 +74,10 @@ class TestMovingAverage:
         f = MovingAverageFilter()
         assert f.estimated_delay_samples(ctx, window_size=240) == pytest.approx(119.5)
 
+    def test_startup_discard_matches_window_minus_one(self, ctx):
+        f = MovingAverageFilter()
+        assert f.startup_discard_samples(ctx, data_len=1000, window_size=21) == 20
+
 
 # ── Median ──────────────────────────────────────
 
@@ -107,6 +111,10 @@ class TestMedian:
         f = MedianFilter()
         result = f.apply(data, ctx, kernel_size=5)
         np.testing.assert_allclose(result, np.array([0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0]))
+
+    def test_startup_discard_matches_kernel_minus_one(self, ctx):
+        f = MedianFilter()
+        assert f.startup_discard_samples(ctx, data_len=1000, kernel_size=7) == 6
 
 
 # ── FIR ─────────────────────────────────────────
@@ -225,6 +233,18 @@ class TestFIR:
         f = FIRFilter()
         assert f.estimated_delay_samples(ctx, mode="lowpass", cutoff_low=50.0, numtaps=101) == pytest.approx(50.0)
 
+    def test_startup_discard_matches_numtaps_minus_one(self, ctx):
+        f = FIRFilter()
+        assert f.startup_discard_samples(ctx, data_len=1000, mode="lowpass", cutoff_low=50.0, numtaps=101) == 100
+
+    def test_startup_discard_uses_effective_numtaps_for_shorter_data(self, ctx):
+        f = FIRFilter()
+        assert f.startup_discard_samples(ctx, data_len=30, mode="lowpass", cutoff_low=50.0, numtaps=101) == 10
+
+    def test_startup_discard_is_zero_when_fir_is_bypassed_for_very_short_data(self, ctx):
+        f = FIRFilter()
+        assert f.startup_discard_samples(ctx, data_len=8, mode="lowpass", cutoff_low=50.0, numtaps=101) == 0
+
 
 # ── Lead Compensator ─────────────────────────────
 
@@ -299,6 +319,11 @@ class TestBesselLowpass:
         result = BesselLowpassFilter().apply(data, ctx, cutoff_hz=20.0)
         overshoot = float(np.max(result) - 1.0)
         assert overshoot <= 0.02
+
+    def test_cutoff_max_is_c_friendly_limit(self, ctx):
+        f = BesselLowpassFilter()
+        specs = {s.name: s for s in f.get_params_spec(ctx)}
+        assert specs["cutoff_hz"].max == pytest.approx(450.0)
 
 
 # ── Critical Damped Lowpass ─────────────────────
@@ -381,3 +406,7 @@ class TestLeadCompensator:
         f = LeadCompensatorFilter()
         with pytest.raises(ValueError, match="below minimum"):
             f.apply(sine_data, ctx, capacitor_uf=0.0)
+
+    def test_startup_discard_is_one_sample(self, ctx):
+        f = LeadCompensatorFilter()
+        assert f.startup_discard_samples(ctx, data_len=1000) == 1
