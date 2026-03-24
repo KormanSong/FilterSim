@@ -62,7 +62,7 @@ class _BaseSecondOrderLowpassFilter(BaseFilter):
             name="cutoff_hz",
             label="Cutoff",
             type="float",
-            default=0.5,
+            default=7.0,
             min=0.001,
             max=None,
             step=0.05,
@@ -99,7 +99,7 @@ class _BaseSecondOrderLowpassFilter(BaseFilter):
 
 
 class BesselLowpassFilter(_BaseSecondOrderLowpassFilter):
-    name = "Bessel Lowpass (2nd)"
+    name = "Bessel LPF (2nd)"
     description = (
         "Second-order Bessel low-pass biquad for post-lead smoothing with minimal step overshoot"
     )

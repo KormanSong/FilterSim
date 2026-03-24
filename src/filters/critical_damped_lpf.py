@@ -1,4 +1,4 @@
-"""Lead Compensator filter for OriginalAD -> iFilteredAdSensor path."""
+"""Second-order critically damped low-pass filter implemented as cascaded EMA."""
 
 from __future__ import annotations
 
@@ -13,19 +13,12 @@ from src.signal_context import SignalContext
 _MICRO_TO_BASE = 1e-6
 
 
-class LeadCompensatorFilter(BaseFilter):
-    name = "미분 필터"
-    description = "Discrete lead compensator using g_rKrCoeff1 and RC time constant"
+class CriticalDampedLowpassFilter(BaseFilter):
+    name = "IIR LPF (2차)"
+    description = (
+        "Second-order critically damped low-pass using two cascaded EMA stages"
+    )
     params_spec = (
-        ParamSpec(
-            name="kr_coeff1",
-            label="Gain (g_rKrCoeff1)",
-            type="float",
-            default=135.0,
-            min=0.0,
-            max=10000.0,
-            step=1.0,
-        ),
         ParamSpec(
             name="resistor_ohms",
             label="Resistor",
@@ -40,11 +33,14 @@ class LeadCompensatorFilter(BaseFilter):
             name="capacitor_uf",
             label="Capacitor",
             type="float",
-            default=33.0,
+            default=10.0,
             min=0.001,
             max=1_000_000.0,
             step=1.0,
             unit="uF",
+            help_text=(
+                "Two identical RC low-pass stages in series. Useful for post-lead spike absorption."
+            ),
         ),
     )
 
@@ -52,7 +48,6 @@ class LeadCompensatorFilter(BaseFilter):
         self, data: NDArray[np.float64], ctx: SignalContext, **params: Any
     ) -> NDArray[np.float64]:
         p = self.validate_params(ctx, **params)
-        kr_coeff1: float = p["kr_coeff1"]
         resistor_ohms: float = p["resistor_ohms"]
         capacitor_uf: float = p["capacitor_uf"]
 
@@ -64,15 +59,16 @@ class LeadCompensatorFilter(BaseFilter):
             return result
 
         rc_seconds = resistor_ohms * capacitor_uf * _MICRO_TO_BASE
-        a = rc_seconds / (rc_seconds + ctx.dt)
+        alpha = ctx.dt / (rc_seconds + ctx.dt)
 
-        prev_sensor_diff = 0.0
-        prev_original = float(result[0])
+        stage1 = float(result[0])
+        stage2 = stage1
+        result[0] = stage2
 
-        for i, original in enumerate(result):
-            sensor_diff = a * (prev_sensor_diff + original - prev_original)
-            result[i] = original + kr_coeff1 * sensor_diff
-            prev_sensor_diff = sensor_diff
-            prev_original = original
+        for i in range(1, result.size):
+            x = float(result[i])
+            stage1 = stage1 + alpha * (x - stage1)
+            stage2 = stage2 + alpha * (stage1 - stage2)
+            result[i] = stage2
 
         return result

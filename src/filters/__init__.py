@@ -6,13 +6,15 @@ from src.filters.median import MedianFilter
 from src.filters.fir import FIRFilter
 from src.filters.iir_lpf import IIRLowpassFilter
 from src.filters.biquad_lowpass import BesselLowpassFilter
+from src.filters.critical_damped_lpf import CriticalDampedLowpassFilter
 from src.filters.lead_compensator import LeadCompensatorFilter
 
 FILTER_REGISTRY: dict[str, type[BaseFilter]] = {
-    "Moving Average": MovingAverageFilter,
-    "Median": MedianFilter,
     "FIR": FIRFilter,
-    "IIR Lowpass": IIRLowpassFilter,
-    "Bessel Lowpass (2nd)": BesselLowpassFilter,
-    "Lead Compensator": LeadCompensatorFilter,
+    "미분 필터": LeadCompensatorFilter,
+    "이동평균 (MA)": MovingAverageFilter,
+    "Median": MedianFilter,
+    "IIR LPF": IIRLowpassFilter,
+    "IIR LPF (2차)": CriticalDampedLowpassFilter,
+    "Bessel LPF (2nd)": BesselLowpassFilter,
 }

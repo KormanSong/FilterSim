@@ -9,6 +9,7 @@ from src.filters.median import MedianFilter
 from src.filters.fir import FIRFilter
 from src.filters.iir_lpf import IIRLowpassFilter
 from src.filters.biquad_lowpass import BesselLowpassFilter
+from src.filters.critical_damped_lpf import CriticalDampedLowpassFilter
 from src.filters.lead_compensator import LeadCompensatorFilter
 
 
@@ -179,7 +180,7 @@ class TestFIR:
         f = FIRFilter()
         defaults = f.default_params(ctx)
         assert defaults["mode"] == "lowpass"
-        assert defaults["numtaps"] == 101
+        assert defaults["numtaps"] == 9
 
     def test_lowfs_highpass_hidden_cutoff_low(self):
         """fs=60 → highpass에서 cutoff_low(기본값 50)가 숨김 처리되어 검증 통과"""
@@ -199,7 +200,7 @@ class TestFIR:
         assert len(result) == 100
 
     def test_default_params_clamp_low_fs(self):
-        """fs=60 → default cutoff_low(50) 및 cutoff_high(200) clamp 확인"""
+        """fs=60 → default cutoff_low(100) 및 cutoff_high(200) clamp 확인"""
         ctx_low = SignalContext(fs=60.0, dt=1/60, is_uniform=True, n_total=100, n_valid=100)
         f = FIRFilter()
         defaults = f.default_params(ctx_low)
@@ -211,7 +212,7 @@ class TestFIR:
         """fs=1000 → 기본값 유지 (clamp 불필요)"""
         f = FIRFilter()
         defaults = f.default_params(ctx)
-        assert defaults["cutoff_low"] == 50.0
+        assert defaults["cutoff_low"] == 100.0
         assert defaults["cutoff_high"] == 200.0
 
     def test_unknown_param_raises(self, ctx, sine_data):
@@ -298,6 +299,51 @@ class TestBesselLowpass:
         result = BesselLowpassFilter().apply(data, ctx, cutoff_hz=20.0)
         overshoot = float(np.max(result) - 1.0)
         assert overshoot <= 0.02
+
+
+# ── Critical Damped Lowpass ─────────────────────
+
+class TestCriticalDampedLowpass:
+    def test_output_length(self, ctx, sine_data):
+        f = CriticalDampedLowpassFilter()
+        result = f.apply(sine_data, ctx)
+        assert len(result) == len(sine_data)
+
+    def test_constant_signal_passthrough(self, ctx):
+        data = np.full(128, 12.5)
+        f = CriticalDampedLowpassFilter()
+        result = f.apply(data, ctx)
+        np.testing.assert_allclose(result, data)
+
+    def test_step_response_is_monotonic_without_overshoot(self, ctx):
+        data = np.concatenate([np.zeros(10), np.ones(200)])
+        result = CriticalDampedLowpassFilter().apply(
+            data,
+            ctx,
+            resistor_ohms=1000.0,
+            capacitor_uf=10.0,
+        )
+        tail = result[10:]
+        assert np.all(np.diff(tail) >= -1e-12)
+        assert float(np.max(result)) <= 1.0 + 1e-9
+
+    def test_high_frequency_is_attenuated_more_than_low_frequency(self, ctx):
+        t = np.linspace(0, 1.0, 1000, endpoint=False)
+        low = np.sin(2 * np.pi * 5 * t)
+        high = np.sin(2 * np.pi * 100 * t)
+        f = CriticalDampedLowpassFilter()
+
+        low_filtered = f.apply(low, ctx)
+        high_filtered = f.apply(high, ctx)
+
+        low_gain = np.std(low_filtered) / np.std(low)
+        high_gain = np.std(high_filtered) / np.std(high)
+        assert low_gain > high_gain
+
+    def test_invalid_capacitor_below_min(self, ctx, sine_data):
+        f = CriticalDampedLowpassFilter()
+        with pytest.raises(ValueError, match="below minimum"):
+            f.apply(sine_data, ctx, capacitor_uf=0.0)
 
 
 # ── Lead Compensator ─────────────────────────────

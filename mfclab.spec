@@ -31,6 +31,7 @@ a = Analysis(
         'src.filters.fir',
         'src.filters.iir_lpf',
         'src.filters.biquad_lowpass',
+        'src.filters.critical_damped_lpf',
         'src.filters.lead_compensator',
     ],
     hookspath=[],

@@ -10,6 +10,7 @@ from src.filters.median import MedianFilter
 from src.filters.fir import FIRFilter
 from src.filters.iir_lpf import IIRLowpassFilter
 from src.filters.biquad_lowpass import BesselLowpassFilter
+from src.filters.critical_damped_lpf import CriticalDampedLowpassFilter
 from src.filters.lead_compensator import LeadCompensatorFilter
 from src.filters import FILTER_REGISTRY
 
@@ -82,7 +83,7 @@ class TestFilterChain:
         chain.add(MedianFilter(), {"kernel_size": 3})
         chain.move(1, 0)
         assert chain.entries[0].filter_instance.name == "Median"
-        assert chain.entries[1].filter_instance.name == "Moving Average"
+        assert chain.entries[1].filter_instance.name == "이동평균 (MA)"
 
     def test_set_params(self, ctx, data):
         chain = FilterChain()
@@ -111,13 +112,14 @@ class TestFilterChain:
         assert result.dtype == np.float64
 
     def test_registry_has_three_filters(self):
-        assert len(FILTER_REGISTRY) == 6
-        assert "Moving Average" in FILTER_REGISTRY
+        assert len(FILTER_REGISTRY) == 7
+        assert "이동평균 (MA)" in FILTER_REGISTRY
         assert "Median" in FILTER_REGISTRY
         assert "FIR" in FILTER_REGISTRY
-        assert "IIR Lowpass" in FILTER_REGISTRY
-        assert "Bessel Lowpass (2nd)" in FILTER_REGISTRY
-        assert "Lead Compensator" in FILTER_REGISTRY
+        assert "미분 필터" in FILTER_REGISTRY
+        assert "IIR LPF" in FILTER_REGISTRY
+        assert "IIR LPF (2차)" in FILTER_REGISTRY
+        assert "Bessel LPF (2nd)" in FILTER_REGISTRY
 
     def test_iir_lowpass_in_chain(self, ctx, data):
         chain = FilterChain()
@@ -137,6 +139,13 @@ class TestFilterChain:
     def test_bessel_lowpass_in_chain(self, ctx, data):
         chain = FilterChain()
         chain.add(BesselLowpassFilter(), {"cutoff_hz": 20.0})
+        result = chain.execute(data, ctx)
+        assert len(result) == len(data)
+        assert result.dtype == np.float64
+
+    def test_critical_damped_lowpass_in_chain(self, ctx, data):
+        chain = FilterChain()
+        chain.add(CriticalDampedLowpassFilter(), {})
         result = chain.execute(data, ctx)
         assert len(result) == len(data)
         assert result.dtype == np.float64

@@ -1,4 +1,4 @@
-"""메인 윈도우 — UI 로드, 그래프 관리, 필터 체인 연결."""
+"""메인 윈도우 — UI 로드, 그래프 관리, 필터 체인 연결, 평가 지표."""
 
 from pathlib import Path
 
@@ -10,20 +10,37 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtCore import QFile, Qt
-from PySide6.QtGui import QCursor
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QVBoxLayout, QWidget
+from PySide6.QtGui import QCursor, QAction
+from PySide6.QtWidgets import QApplication, QMessageBox, QVBoxLayout, QWidget
 
-from src.csv_loader import read_headers, load_columns, validate_time_axis
+from src.csv_loader import load_columns, validate_time_axis
+from src.csv_dialog import CSVOpenDialog
 from src.signal_context import SignalContext
 from src.filter_chain import FilterChain
 from src.filters import FILTER_REGISTRY
 from src.chain_card import ChainCard
 from src.fft_engine import compute_fft
+from src.metrics_engine import compute_metrics
 from src.resources import resource_path
 
 pg.setConfigOptions(antialias=False)
 
 UI_PATH = resource_path("ui/mainwindow.ui")
+
+# ── 모드별 그래프 설정 ─────────────────────────────────────
+# 각 항목: (title, x_label, y_label, log_y)
+_PLOT_CONFIGS = {
+    "filter": {
+        "graphMain": ("Time Domain — Raw (gray) + Filtered (blue)", "Time", "Amplitude", False),
+        "graphFFTRaw": ("FFT — Raw (DC removed)", "Frequency (Hz)", "Magnitude (log)", True),
+        "graphFFTFiltered": ("FFT — Filtered (DC removed)", "Frequency (Hz)", "Magnitude (log)", True),
+    },
+    "analysis": {
+        "graphMain": ("Time Domain — Raw (gray) + Model (red)", "Time", "Amplitude", False),
+        "graphFFTRaw": ("Welch PSD — Residual", "Frequency (Hz)", "PSD (V\u00b2/Hz)", True),
+        "graphFFTFiltered": ("", "Frequency (Hz)", "", True),
+    },
+}
 
 
 def create_main_window():
@@ -48,8 +65,11 @@ def create_main_window():
     window._signal_ctx = None
     window._filter_chain = FilterChain()
     window._collapsed_states = []
+    window._filtered_data = None  # 캐시: metrics 재계산 시 체인 재실행 방지
+    window._current_mode = "filter"
 
     _setup_graphs(window)
+    _setup_region(window)
     _init_combos(window)
     _connect_signals(window)
     return window
@@ -58,21 +78,12 @@ def create_main_window():
 # ── 초기화 ──────────────────────────────────────────────
 
 def _setup_graphs(window):
-    """PyQtGraph 위젯 3개를 .ui의 빈 QWidget 컨테이너에 삽입"""
-    graph_configs = [
-        ("graphMain", "Time Domain — Raw (gray) + Filtered (blue)", "Time", "Amplitude"),
-        ("graphFFTRaw", "FFT — Raw (DC removed)", "Frequency (Hz)", "Magnitude (log)"),
-        ("graphFFTFiltered", "FFT — Filtered (DC removed)", "Frequency (Hz)", "Magnitude (log)"),
-    ]
-
-    for obj_name, title, x_label, y_label in graph_configs:
+    """PyQtGraph 위젯 3개를 .ui의 빈 QWidget 컨테이너에 삽입한다."""
+    for obj_name in ("graphMain", "graphFFTRaw", "graphFFTFiltered"):
         container = window.findChild(QWidget, obj_name)
         plot_widget = pg.PlotWidget()
         plot_widget.setAntialiasing(False)
         plot_widget.setBackground("w")
-        plot_widget.setTitle(title)
-        plot_widget.setLabel("left", y_label)
-        plot_widget.setLabel("bottom", x_label)
         plot_widget.showGrid(x=True, y=True)
         plot_widget.getPlotItem().setDownsampling(auto=True, mode="peak")
 
@@ -83,7 +94,7 @@ def _setup_graphs(window):
 
         setattr(window, f"_plot_{obj_name}", plot_widget)
 
-    # PlotDataItem — Raw + Filtered 라인 (setData로 갱신)
+    # 필터 모드 PlotDataItem — Raw + Filtered 라인 (setData로 갱신)
     main_plot = window._plot_graphMain
     window._line_raw = main_plot.plot(
         pen=pg.mkPen(color=(70, 70, 70), width=2.2), name="Raw"
@@ -91,10 +102,6 @@ def _setup_graphs(window):
     window._line_filtered = main_plot.plot(
         pen=pg.mkPen(color=(0, 110, 220), width=2.4), name="Filtered"
     )
-
-    # FFT 그래프 log-y 스케일
-    window._plot_graphFFTRaw.setLogMode(x=False, y=True)
-    window._plot_graphFFTFiltered.setLogMode(x=False, y=True)
 
     # FFT PlotDataItem
     window._line_fft_raw = window._plot_graphFFTRaw.plot(
@@ -110,76 +117,103 @@ def _setup_graphs(window):
         window._line_fft_raw,
         window._line_fft_filtered,
     ):
-        # 성능 우선: 직선 세그먼트만 그리고, 뷰 범위 밖 포인트와 finite 검사를 줄인다.
         line.setClipToView(True)
         line.setDownsampling(auto=True, method="peak")
         line.setSkipFiniteCheck(True)
 
+    # 초기 모드의 제목/축/스케일 적용
+    _configure_plots(window, window._current_mode)
+
+
+def _configure_plots(window, mode: str):
+    """모드에 따라 그래프 제목, 축 라벨, 로그 스케일을 일괄 적용한다."""
+    config = _PLOT_CONFIGS[mode]
+    for obj_name, (title, x_label, y_label, log_y) in config.items():
+        plot_widget = getattr(window, f"_plot_{obj_name}")
+        plot_widget.setTitle(title)
+        plot_widget.setLabel("left", y_label)
+        plot_widget.setLabel("bottom", x_label)
+        plot_widget.setLogMode(x=False, y=log_y)
+
+
+def _set_mode(window, mode: str):
+    """모드를 전환하고 그래프/UI를 갱신한다.
+
+    현재 filter/analysis 두 모드를 지원한다.
+    모드 전환 시 그래프 설정을 변경하고 데이터를 다시 표시한다.
+    """
+    if window._current_mode == mode:
+        return
+    window._current_mode = mode
+    _configure_plots(window, mode)
+    _update_graphs(window)
+
+
+def _setup_region(window):
+    """메인 그래프에 분석 구간 LinearRegionItem을 추가한다.
+
+    초기에는 숨김 상태. 데이터 로드 시 후반 20%에 배치하고 표시.
+    """
+    region = pg.LinearRegionItem(
+        values=(0, 1),
+        brush=pg.mkBrush(0, 100, 200, 30),
+        pen=pg.mkPen(color=(0, 100, 200, 120), width=1),
+        movable=True,
+    )
+    region.setVisible(False)
+    window._plot_graphMain.addItem(region)
+    window._analysis_region = region
+
+    # 드래그 완료 시에만 metrics 재계산 (sigRegionChangeFinished)
+    region.sigRegionChangeFinished.connect(lambda: _update_metrics(window))
+
 
 def _init_combos(window):
     """콤보박스 초기값 설정"""
-    # FFT Window
     window.comboFFTWindow.addItems(["None", "Hann", "Hamming", "Blackman"])
-
-    # Filter Type — 레지스트리에서 이름 채우기
     window.comboFilterType.addItems(list(FILTER_REGISTRY.keys()))
 
 
 def _connect_signals(window):
-    """버튼 시그널 연결"""
-    window.btnOpenCSV.clicked.connect(lambda: _on_open_csv(window))
-    window.btnLoadData.clicked.connect(lambda: _on_load_data(window))
+    """시그널 연결"""
+    # 메뉴바: Open CSV (actionOpenCSV는 .ui에서 menubar에 직접 배치)
+    action = window.findChild(QAction, "actionOpenCSV")
+    if action is not None:
+        action.triggered.connect(lambda: _on_open_csv(window))
+
     window.btnAddFilter.clicked.connect(lambda: _on_add_filter(window))
     window.btnClearChain.clicked.connect(lambda: _on_clear_chain(window))
     window.comboFFTWindow.currentTextChanged.connect(lambda: _update_graphs(window))
+
+    # Metrics 컨트롤
+    window.spinHFCutoff.editingFinished.connect(lambda: _update_metrics(window))
+    window.checkShowRegion.toggled.connect(
+        lambda checked: window._analysis_region.setVisible(
+            checked and window._data_array is not None
+        )
+    )
 
 
 # ── CSV 흐름 ────────────────────────────────────────────
 
 def _on_open_csv(window):
-    """CSV 파일 선택 → 헤더 읽기 → 콤보박스 채우기"""
-    path, _ = QFileDialog.getOpenFileName(
-        window, "Open CSV File", "", "CSV Files (*.csv);;All Files (*)"
-    )
-    if not path:
-        return
+    """Open CSV → 다이얼로그로 파일 + 열 선택 + 로드."""
+    last_path = window._csv_path or ""
+    dlg = CSVOpenDialog(window, last_path=last_path)
 
-    try:
-        headers = read_headers(path)
-    except Exception as e:
-        QMessageBox.critical(window, "Error", f"Failed to read CSV headers:\n{e}")
-        return
+    if dlg.exec() != CSVOpenDialog.Accepted:
+        return  # Cancel → 현재 화면 상태 유지
 
-    if len(headers) < 2:
-        QMessageBox.warning(window, "Warning", "CSV must have at least 2 columns.")
-        return
+    path = dlg.selected_path
+    time_col = dlg.selected_time_col
+    data_col = dlg.selected_data_col
 
-    window._csv_path = path
-
-    window.comboTimeCol.clear()
-    window.comboDataCol.clear()
-    window.comboTimeCol.addItems(headers)
-    window.comboDataCol.addItems(headers)
-
-    # Data 열은 두 번째 컬럼을 기본 선택
-    if len(headers) >= 2:
-        window.comboDataCol.setCurrentIndex(1)
-
-    window.btnLoadData.setEnabled(True)
-    window.labelStatus.setText(f"File: {Path(path).name} — Select columns and load")
+    _load_data(window, path, time_col, data_col)
 
 
-def _on_load_data(window):
-    """선택 열 로드 → 시간축 검증 → 그래프 표시"""
-    path = window._csv_path
-    time_col = window.comboTimeCol.currentText()
-    data_col = window.comboDataCol.currentText()
-
-    if time_col == data_col:
-        QMessageBox.warning(window, "Warning", "Time and Data columns must be different.")
-        return
-
-    # busy cursor — 대용량 CSV 로드 중 시각적 피드백
+def _load_data(window, path: str, time_col: str, data_col: str):
+    """CSV 로드 → 검증 → 상태 갱신. 실패 시 현재 화면 상태를 유지한다."""
+    # busy cursor
     QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
     try:
         time_arr, data_arr, n_total, n_valid = load_columns(path, time_col, data_col)
@@ -190,7 +224,7 @@ def _on_load_data(window):
         QApplication.restoreOverrideCursor()
 
     if n_valid < 2:
-        QMessageBox.warning(window, "Warning", "Not enough valid data points (need ≥ 2).")
+        QMessageBox.warning(window, "Warning", "Not enough valid data points (need \u2265 2).")
         return
 
     try:
@@ -213,28 +247,50 @@ def _on_load_data(window):
         if reply == QMessageBox.No:
             return
 
-    # 새 데이터 로드 → 전체 상태 초기화 (재로드 시 이전 에러 상태 해제)
+    # ── 여기까지 오면 로드 성공 → 상태 갱신 ──
+
+    # 체인 초기화
     window._filter_chain.clear()
     window._collapsed_states.clear()
+    window._filtered_data = None
     _rebuild_chain_ui(window)
 
     # 상태 저장
+    window._csv_path = path
     window._time_array = time_arr
     window._data_array = data_arr
     window._signal_ctx = ctx
 
+    # 필터 모드로 복귀 (분석 모드에서 새 파일 로드 시)
+    if window._current_mode != "filter":
+        window._current_mode = "filter"
+        _configure_plots(window, "filter")
+
+    # 분석 구간: 후반 20%
+    t_start = time_arr[0]
+    t_end = time_arr[-1]
+    t_80pct = t_start + (t_end - t_start) * 0.8
+    window._analysis_region.setRegion((t_80pct, t_end))
+    window._analysis_region.setVisible(window.checkShowRegion.isChecked())
+
+    # HF cutoff 기본값: fs / 20
+    default_cutoff = ctx.fs / 20.0
+    window.spinHFCutoff.setMaximum(ctx.fs / 2.0)
+    window.spinHFCutoff.setValue(default_cutoff)
+    window.spinHFCutoff.setEnabled(True)
+    window.checkShowRegion.setEnabled(True)
+
     # 그래프 갱신
     _update_graphs(window)
 
-    # 필터/FFT 컨트롤 활성화
+    # 컨트롤 활성화
     window.comboFilterType.setEnabled(True)
     window.btnAddFilter.setEnabled(True)
     window.btnClearChain.setEnabled(True)
     window.comboFFTWindow.setEnabled(True)
 
-    # Window 타이틀 갱신
-    filename = Path(path).name
-    window.setWindowTitle(f"MFClab — {filename}")
+    # Window 타이틀
+    window.setWindowTitle(f"MFClab \u2014 {Path(path).name}")
 
     # 상태 표시
     window.labelStatus.setText(
@@ -260,6 +316,7 @@ def _on_clear_chain(window):
     """체인 전체 초기화"""
     window._filter_chain.clear()
     window._collapsed_states.clear()
+    window._filtered_data = None
     _rebuild_chain_ui(window)
     _update_graphs(window)
 
@@ -341,7 +398,15 @@ def _build_status_text(window) -> str:
 
 
 def _update_graphs(window):
-    """Raw + Filtered + FFT Raw + FFT Filtered를 단일 사이클로 갱신한다."""
+    """현재 모드에 따라 적절한 그래프 갱신 함수를 호출한다."""
+    if window._current_mode == "filter":
+        _update_filter_mode(window)
+    else:
+        _update_analysis_mode(window)
+
+
+def _update_filter_mode(window):
+    """필터 모드: Raw + Filtered + FFT Raw + FFT Filtered를 갱신한다."""
     time_arr = window._time_array
     data_arr = window._data_array
     ctx = window._signal_ctx
@@ -362,12 +427,15 @@ def _update_graphs(window):
 
     if len(chain) == 0 or not has_active:
         window._line_filtered.setData([], [])
+        window._filtered_data = None
     else:
         try:
             filtered_data = chain.execute(data_arr, ctx)
             window._line_filtered.setData(time_arr, filtered_data)
+            window._filtered_data = filtered_data  # 캐시
         except (ValueError, Exception) as e:
             window._line_filtered.setData([], [])
+            window._filtered_data = None
             window.labelStatus.setText(f"Filter error: {e}")
             filter_error = True
 
@@ -385,6 +453,75 @@ def _update_graphs(window):
     # ── 상태 표시 (에러 없는 경우만 갱신) ──
     if not filter_error:
         window.labelStatus.setText(_build_status_text(window))
+
+    # ── Metrics 갱신 ──
+    _update_metrics(window)
+
+
+def _update_analysis_mode(window):
+    """분석 모드 그래프 갱신. (9-2 이후에서 구현 예정)
+
+    현재는 필터 모드 라인을 클리어하고 상태 메시지만 표시한다.
+    """
+    window._line_raw.setData([], [])
+    window._line_filtered.setData([], [])
+    window._line_fft_raw.setData([], [])
+    window._line_fft_filtered.setData([], [])
+
+    if window._data_array is not None:
+        window.labelStatus.setText("Analysis mode \u2014 not yet implemented")
+
+
+def _update_metrics(window):
+    """평가 지표를 (재)계산하여 UI에 표시한다.
+
+    _update_filter_mode()의 마지막에 호출되거나,
+    spinHFCutoff / LinearRegionItem 변경 시 단독 호출된다.
+    체인 재실행 없이 캐시된 _filtered_data를 사용한다.
+    """
+    data_arr = window._data_array
+    filtered = window._filtered_data
+    ctx = window._signal_ctx
+    time_arr = window._time_array
+
+    # 데이터 또는 필터 결과 없으면 초기화
+    if data_arr is None or filtered is None or ctx is None or time_arr is None:
+        window.labelSettledStd.setText("\u2014")
+        window.labelHFRMS.setText("\u2014")
+        return
+
+    # 분석 구간 → 인덱스 변환
+    t_min, t_max = window._analysis_region.getRegion()
+    start_idx = int(np.searchsorted(time_arr, t_min, side="left"))
+    end_idx = int(np.searchsorted(time_arr, t_max, side="right"))
+
+    cutoff_hz = window.spinHFCutoff.value()
+
+    result = compute_metrics(data_arr, filtered, ctx.fs, cutoff_hz, start_idx, end_idx)
+
+    # Settled std 표시
+    if result.raw_settled_std > 0:
+        reduction = (1.0 - result.filt_settled_std / result.raw_settled_std) * 100.0
+        window.labelSettledStd.setText(
+            f"{result.raw_settled_std:.2f} \u2192 {result.filt_settled_std:.2f} "
+            f"({reduction:+.0f}%)"
+        )
+    else:
+        window.labelSettledStd.setText(
+            f"{result.raw_settled_std:.2f} \u2192 {result.filt_settled_std:.2f}"
+        )
+
+    # HF RMS 표시
+    if result.raw_hf_rms > 0:
+        hf_reduction = (1.0 - result.filt_hf_rms / result.raw_hf_rms) * 100.0
+        window.labelHFRMS.setText(
+            f"{result.raw_hf_rms:.2f} \u2192 {result.filt_hf_rms:.2f} "
+            f"({hf_reduction:+.0f}%)"
+        )
+    else:
+        window.labelHFRMS.setText(
+            f"{result.raw_hf_rms:.2f} \u2192 {result.filt_hf_rms:.2f}"
+        )
 
 
 # ── 체인 UI 재구성 ──────────────────────────────────────

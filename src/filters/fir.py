@@ -29,7 +29,7 @@ class FIRFilter(BaseFilter):
             name="cutoff_low",
             label="Cutoff Low",
             type="float",
-            default=50.0,
+            default=100.0,
             min=0.1,
             max=None,  # 동적: fs/2 - 런타임에 결정
             step=1.0,
@@ -51,7 +51,7 @@ class FIRFilter(BaseFilter):
             name="numtaps",
             label="Num Taps",
             type="int",
-            default=101,
+            default=9,
             min=5,
             max=1001,
             step=2,

@@ -12,14 +12,14 @@ from src.filters.base import BaseFilter, ParamSpec
 
 
 class MovingAverageFilter(BaseFilter):
-    name = "Moving Average"
+    name = "이동평균 (MA)"
     description = "Causal moving average using current and past samples only"
     params_spec = (
         ParamSpec(
             name="window_size",
             label="Window Size",
             type="int",
-            default=5,
+            default=20,
             min=1,
             max=5000,
             step=1,

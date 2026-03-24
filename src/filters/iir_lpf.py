@@ -14,7 +14,7 @@ _MICRO_TO_BASE = 1e-6
 
 
 class IIRLowpassFilter(BaseFilter):
-    name = "IIR Lowpass"
+    name = "IIR LPF"
     description = "First-order RC low-pass (y[n] = y[n-1] + alpha * (x[n] - y[n-1]))"
     params_spec = (
         ParamSpec(

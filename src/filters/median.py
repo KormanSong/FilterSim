@@ -19,7 +19,7 @@ class MedianFilter(BaseFilter):
             name="kernel_size",
             label="Kernel Size",
             type="int",
-            default=5,
+            default=7,
             min=3,
             max=501,
             step=2,
