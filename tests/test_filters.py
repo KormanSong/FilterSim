@@ -410,3 +410,66 @@ class TestLeadCompensator:
     def test_startup_discard_is_one_sample(self, ctx):
         f = LeadCompensatorFilter()
         assert f.startup_discard_samples(ctx, data_len=1000) == 1
+
+    # ── lfilter 전환 검증 테스트 ──────────────────────
+
+    @staticmethod
+    def _reference_loop(data, dt, kr_coeff1, resistor_ohms, capacitor_uf):
+        """원본 for-loop 구현 (lfilter 전환 후 수치 동등성 검증용)."""
+        result = data.astype(np.float64, copy=True)
+        if result.size == 0:
+            return result
+        rc = resistor_ohms * capacitor_uf * 1e-6
+        a = rc / (rc + dt)
+        prev_sensor_diff = 0.0
+        prev_original = float(result[0])
+        for i, original in enumerate(result):
+            sensor_diff = a * (prev_sensor_diff + original - prev_original)
+            result[i] = original + kr_coeff1 * sensor_diff
+            prev_sensor_diff = sensor_diff
+            prev_original = original
+        return result
+
+    @pytest.mark.parametrize("kr,R,C", [
+        (0.0, 1000.0, 33.0),
+        (1.0, 1000.0, 33.0),
+        (135.0, 1000.0, 33.0),
+        (10000.0, 1000.0, 33.0),
+        (135.0, 0.1, 0.001),
+        (135.0, 1_000_000.0, 1_000_000.0),
+    ])
+    def test_numerical_equivalence_with_reference(self, ctx, kr, R, C):
+        """lfilter 결과가 원본 for-loop과 수치적으로 동등한지 검증."""
+        rng = np.random.RandomState(42)
+        for data in [
+            rng.randn(1000),
+            np.full(100, 42.0),
+            np.concatenate([np.zeros(50), np.ones(50)]),
+            np.linspace(0, 100, 500),
+        ]:
+            expected = self._reference_loop(data, ctx.dt, kr, R, C)
+            f = LeadCompensatorFilter()
+            actual = f.apply(data, ctx, kr_coeff1=kr, resistor_ohms=R, capacitor_uf=C)
+            np.testing.assert_allclose(actual, expected, atol=1e-8)
+
+    @pytest.mark.parametrize("kr", [0.0, 1.0, 135.0, 10000.0])
+    def test_first_sample_equals_input(self, ctx, kr):
+        """모든 K 값에서 첫 번째 출력이 입력과 동일한지 검증."""
+        data = np.array([42.0, 50.0, 60.0])
+        f = LeadCompensatorFilter()
+        result = f.apply(data, ctx, kr_coeff1=kr)
+        assert result[0] == data[0]
+
+    def test_single_element(self, ctx):
+        """단일 원소 입력은 그대로 반환되어야 한다."""
+        data = np.array([7.77])
+        f = LeadCompensatorFilter()
+        result = f.apply(data, ctx)
+        assert result[0] == pytest.approx(7.77)
+
+    def test_empty_array(self, ctx):
+        """빈 배열 입력은 빈 배열을 반환해야 한다."""
+        data = np.array([], dtype=np.float64)
+        f = LeadCompensatorFilter()
+        result = f.apply(data, ctx)
+        assert result.size == 0

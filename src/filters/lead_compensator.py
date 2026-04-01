@@ -74,13 +74,13 @@ class LeadCompensatorFilter(BaseFilter):
         rc_seconds = resistor_ohms * capacitor_uf * _MICRO_TO_BASE
         a = rc_seconds / (rc_seconds + ctx.dt)
 
-        prev_sensor_diff = 0.0
-        prev_original = float(result[0])
+        # H(z) = [(1+Ka) - a(1+K)z^{-1}] / [1 - az^{-1}]
+        from scipy.signal import lfilter
 
-        for i, original in enumerate(result):
-            sensor_diff = a * (prev_sensor_diff + original - prev_original)
-            result[i] = original + kr_coeff1 * sensor_diff
-            prev_sensor_diff = sensor_diff
-            prev_original = original
+        K = kr_coeff1
+        b = np.array([1.0 + K * a, -a * (1.0 + K)])
+        a_coeff = np.array([1.0, -a])
+        zi = np.array([-K * a * float(result[0])])
+        result, _ = lfilter(b, a_coeff, result, zi=zi)
 
-        return result
+        return np.asarray(result, dtype=np.float64)
